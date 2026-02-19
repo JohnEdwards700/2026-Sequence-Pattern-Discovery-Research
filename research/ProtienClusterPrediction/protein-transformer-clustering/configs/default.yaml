@@ -1,0 +1,31 @@
+model: transformer
+embedding_dim: 128
+latent_dim: 64
+num_heads: 8
+num_layers: 6
+dropout_rate: 0.1
+
+training:
+  batch_size: 256
+  epochs: 50
+  learning_rate: 0.001
+  weight_decay: 1e-5
+  scheduler:
+    step_size: 10
+    gamma: 0.1
+
+data:
+  max_sequence_length: 512
+  num_classes: 10
+  train_data_path: data/processed/train_data.npy
+  val_data_path: data/processed/val_data.npy
+
+clustering:
+  n_clusters: 5
+  clustering_method: kmeans
+
+evaluation:
+  metrics:
+    - silhouette_score
+    - davies_bouldin_score
+    - inertia
