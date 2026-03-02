@@ -217,12 +217,28 @@ print("\n=== CLUSTER REPORT ===\n")
 
 global_kmer_mean = np.mean(kmer_matrix, axis=0)
 
-for cid, info in cluster_summary.items():
+# build motif -> kmer index map (skip motifs not in index)
+motif_idx_map = {gene: [KMER_INDEX[m] for m in motifs if m in KMER_INDEX] for gene, motifs in KNOWN_RESISTANCE_MOTIFS.items()}
+
+# count motif hits per cluster per isolate (presence if k-mer count > 0)
+from collections import defaultdict
+motif_counts = defaultdict(lambda: defaultdict(Counter))  # motif_counts[cluster_id][isolate][gene] = count
+
+for cid, iso, vec in zip(cluster_ids, isolate_labels, kmer_matrix):
+    for gene, idxs in motif_idx_map.items():
+        for idx in idxs:
+            if vec[idx] > 0:
+                motif_counts[cid][iso][gene] += 1
+                break
+
+for cid in sorted(cluster_summary.keys()):
+    info = cluster_summary[cid]
     mean_gc = np.mean(info["gc"])
     mean_kmer = np.mean(info["kmer_vectors"], axis=0)
     enriched = mean_kmer - global_kmer_mean
     top_kmers = np.argsort(enriched)[-25:]
 
+    # genes enriched in top kmers (cluster-level heuristic)
     hits = set()
     for gene, motifs in KNOWN_RESISTANCE_MOTIFS.items():
         for m in motifs:
@@ -230,11 +246,14 @@ for cid, info in cluster_summary.items():
             if idx is not None and idx in top_kmers:
                 hits.add(gene)
 
-    print(f"Cluster {cid}")
-    print(f"  Reads: {info['count']}")
+    # per-isolate motif presence summary (counts of reads with motif k-mer)
+    per_isolate_hits = {iso: dict(cnts) for iso, cnts in motif_counts[cid].items()}
+
+    print(f"Cluster {cid} - Reads: {info['count']}")
     print(f"  Mean GC: {mean_gc:.3f}")
     print(f"  Isolate distribution: {dict(info['isolates'])}")
-    print(f"  Resistance signals: {hits if hits else 'None detected'}")
+    print(f"  Resistance signals (cluster-level k-mer enrichment): {hits if hits else 'None detected'}")
+    print(f"  Resistance signals (per-isolate read counts): {per_isolate_hits if per_isolate_hits else 'None detected'}")
     print("")
 
 print("Analysis complete.")

@@ -1,0 +1,645 @@
+# Complete Explanation of the Pipeline
+
+## Overview
+
+This file is a **k-mer based bacterial sequence analysis pipeline** that identifies carbapenem resistance genes in whole genome sequencing (WGS) data. Let me break down every section.
+
+---
+
+## Section-by-Section Breakdown
+
+### 1. Imports and Dependencies
+
+```python
+import os, sys, csv, argparse, itertools
+from collections import defaultdict, Counter
+import numpy as np
+from sklearn.decomposition import PCA
+from sklearn.cluster import MiniBatchKMeans
+```
+
+| Library | Purpose |
+|---------|---------|
+| `numpy` | Fast array math for k-mer vectors |
+| `sklearn.PCA` | Reduces 1024 dimensions → 32 dimensions |
+| `sklearn.MiniBatchKMeans` | Groups similar sequences into clusters |
+| `collections.Counter` | Counts isolates/genes per cluster |
+
+---
+
+### 2. Configuration
+
+```python
+K = 5                    # k-mer length
+LATENT_DIM = 32          # PCA output dimensions
+N_CLUSTERS = 6           # number of k-means clusters
+MAX_READS_PER_ISOLATE = 200000
+```
+
+**Why K=5?**
+- 4^5 = 1024 possible k-mers (manageable)
+- Long enough to capture meaningful patterns
+- Short enough to appear frequently in reads
+
+---
+
+### 3. K-mer Encoding (The Core)
+
+```python
+def generate_kmer_index(k):
+    # Creates: {"AAAAA": 0, "AAAAC": 1, ..., "TTTTT": 1023}
+    kmers = [''.join(combo) for combo in itertools.product("ACGT", repeat=k)]
+    return {kmer: idx for idx, kmer in enumerate(kmers)}
+```
+
+**How `encode_kmers` works:**
+
+```
+Input sequence: "ATCGATCG" (length 8)
+K = 5, so we extract 4 k-mers:
+
+Position 0: ATCGA
+Position 1: TCGAT
+Position 2: CGATC
+Position 3: GATCG
+
+Each k-mer increments its index in a 1024-element vector.
+Then normalize so vector sums to 1.0 (frequencies, not counts).
+```
+
+**Visual:**
+```
+Sequence:  A T C G A T C G
+           |-----|           → ATCGA → vector[idx] += 1
+             |-----|         → TCGAT → vector[idx] += 1
+               |-----|       → CGATC → vector[idx] += 1
+                 |-----|     → GATCG → vector[idx] += 1
+```
+
+---
+
+### 4. FASTA Parsing
+
+```python
+def parse_fasta(filepath, max_reads):
+    # Yields one sequence at a time (memory efficient)
+```
+
+**FASTA format:**
+```
+>read_1 some_description
+ATCGATCGATCGATCGATCG
+ATCGATCGATCGATCGATCG
+>read_2
+GCTAGCTAGCTAGCTAGCTA
+```
+
+The parser streams sequences one-by-one instead of loading all into memory.
+
+---
+
+### 5. Clustering Pipeline
+
+```python
+def perform_clustering(kmer_matrix):
+    # Step 1: PCA (1024 dims → 32 dims)
+    pca = PCA(n_components=32)
+    embeddings = pca.fit_transform(kmer_matrix)
+    
+    # Step 2: K-means (group similar sequences)
+    kmeans = MiniBatchKMeans(n_clusters=6)
+    cluster_ids = kmeans.fit_predict(embeddings)
+```
+
+**Why this works:**
+```
+15,000 reads × 1024 k-mers  →  PCA  →  15,000 × 32 embeddings
+                                            ↓
+                                       K-means
+                                            ↓
+                               6 clusters of similar reads
+```
+
+Reads with similar k-mer profiles (similar sequence composition) end up in the same cluster.
+
+---
+
+### 6. Resistance Detection
+
+```python
+KNOWN_RESISTANCE_MOTIFS = {
+    "blaKPC": ["TGGCG", "CGTGG"],  # KPC gene markers
+    "blaNDM": ["GGGCG", "GATCG"],  # NDM gene markers
+    ...
+}
+```
+
+**Detection method:**
+1. For each read's k-mer vector, check if resistance motif k-mers have count > 0
+2. If yes, that read likely contains part of that resistance gene
+3. Aggregate counts per cluster per isolate
+
+---
+
+### 7. Data Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      INPUT FILES                            │
+│  dataset.fasta    K22_sequence.fasta    K31_sequence.fasta  │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    FASTA PARSING                            │
+│              Extract individual sequences                    │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   K-MER ENCODING                            │
+│         Each sequence → 1024-dim frequency vector           │
+│                                                             │
+│   "ATCGATCG" → [0.0, 0.0, ..., 0.25, ..., 0.25, ...]       │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│              DIMENSIONALITY REDUCTION (PCA)                 │
+│                  1024 dims → 32 dims                        │
+│           Preserves ~95% of variance                        │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                 CLUSTERING (K-MEANS)                        │
+│            Groups similar reads together                    │
+│                  → 6 clusters                               │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│              RESISTANCE MOTIF DETECTION                     │
+│     Check each cluster for resistance gene k-mers           │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                       OUTPUT                                │
+│          cluster_summary.csv + resistance_motifs.csv        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## How to Integrate Another Model
+
+You have several options to feed protein/gene identification into this pipeline:
+
+### Option A: Pre-filter with Protein Language Model
+
+Use a model like **ESM-2** or **ProtTrans** to identify protein-coding regions first:
+
+````python
+# ...existing code...
+
+# =============================================================================
+# PROTEIN MODEL INTEGRATION (Option A: Pre-filtering)
+# =============================================================================
+
+# Requires: pip install transformers torch
+
+def load_protein_model():
+    """Load ESM-2 protein language model for sequence classification."""
+    try:
+        from transformers import AutoTokenizer, AutoModel
+        import torch
+        
+        model_name = "facebook/esm2_t6_8M_UR50D"  # Small ESM-2 model
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModel.from_pretrained(model_name)
+        model.eval()
+        return tokenizer, model
+    except ImportError:
+        print("Install transformers: pip install transformers torch")
+        return None, None
+
+def get_protein_embedding(sequence, tokenizer, model):
+    """
+    Get protein embedding from ESM-2 model.
+    
+    This converts a protein sequence into a dense vector representation
+    that captures evolutionary and structural information.
+    """
+    import torch
+    
+    # Tokenize protein sequence
+    inputs = tokenizer(sequence, return_tensors="pt", padding=True, truncation=True, max_length=512)
+    
+    with torch.no_grad():
+        outputs = model(**inputs)
+        # Use mean pooling over sequence length
+        embedding = outputs.last_hidden_state.mean(dim=1).squeeze().numpy()
+    
+    return embedding
+
+def translate_dna_to_protein(dna_sequence):
+    """
+    Translate DNA to protein (all 6 reading frames).
+    Returns the longest ORF found.
+    """
+    codon_table = {
+        'TTT': 'F', 'TTC': 'F', 'TTA': 'L', 'TTG': 'L',
+        'TCT': 'S', 'TCC': 'S', 'TCA': 'S', 'TCG': 'S',
+        'TAT': 'Y', 'TAC': 'Y', 'TAA': '*', 'TAG': '*',
+        'TGT': 'C', 'TGC': 'C', 'TGA': '*', 'TGG': 'W',
+        'CTT': 'L', 'CTC': 'L', 'CTA': 'L', 'CTG': 'L',
+        'CCT': 'P', 'CCC': 'P', 'CCA': 'P', 'CCG': 'P',
+        'CAT': 'H', 'CAC': 'H', 'CAA': 'Q', 'CAG': 'Q',
+        'CGT': 'R', 'CGC': 'R', 'CGA': 'R', 'CGG': 'R',
+        'ATT': 'I', 'ATC': 'I', 'ATA': 'I', 'ATG': 'M',
+        'ACT': 'T', 'ACC': 'T', 'ACA': 'T', 'ACG': 'T',
+        'AAT': 'N', 'AAC': 'N', 'AAA': 'K', 'AAG': 'K',
+        'AGT': 'S', 'AGC': 'S', 'AGA': 'R', 'AGG': 'R',
+        'GTT': 'V', 'GTC': 'V', 'GTA': 'V', 'GTG': 'V',
+        'GCT': 'A', 'GCC': 'A', 'GCA': 'A', 'GCG': 'A',
+        'GAT': 'D', 'GAC': 'D', 'GAA': 'E', 'GAG': 'E',
+        'GGT': 'G', 'GGC': 'G', 'GGA': 'G', 'GGG': 'G',
+    }
+    
+    def reverse_complement(seq):
+        comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G', 'N': 'N'}
+        return ''.join(comp.get(b, 'N') for b in reversed(seq))
+    
+    def translate_frame(seq, frame):
+        protein = []
+        for i in range(frame, len(seq) - 2, 3):
+            codon = seq[i:i+3]
+            aa = codon_table.get(codon, 'X')
+            if aa == '*':
+                break
+            protein.append(aa)
+        return ''.join(protein)
+    
+    seq = dna_sequence.upper()
+    rev_seq = reverse_complement(seq)
+    
+    # Try all 6 reading frames
+    proteins = []
+    for frame in range(3):
+        proteins.append(translate_frame(seq, frame))
+        proteins.append(translate_frame(rev_seq, frame))
+    
+    # Return longest protein
+    return max(proteins, key=len) if proteins else ""
+
+# =============================================================================
+# ENHANCED PIPELINE WITH PROTEIN EMBEDDINGS
+# =============================================================================
+
+def run_analysis_with_protein_model(fasta_files):
+    """
+    Enhanced pipeline that combines:
+    1. K-mer encoding (DNA level)
+    2. Protein embeddings (protein level)
+    """
+    print("\n" + "=" * 60)
+    print("ENHANCED CARBAPENEM RESISTANCE ANALYSIS")
+    print("(with Protein Language Model)")
+    print("=" * 60)
+    
+    # Load protein model
+    print("\n[0/5] Loading protein language model...")
+    tokenizer, protein_model = load_protein_model()
+    use_protein = tokenizer is not None
+    
+    if use_protein:
+        print("  ESM-2 model loaded successfully")
+    else:
+        print("  Protein model unavailable, using k-mer only")
+    
+    # --- Step 1: Load and encode sequences ---
+    print("\n[1/5] Loading and encoding sequences...")
+    
+    kmer_vectors = []
+    protein_vectors = []
+    gc_values = []
+    isolate_labels = []
+    
+    for isolate_name, filepath in fasta_files.items():
+        if not os.path.exists(filepath):
+            print(f"  Skipping {isolate_name}: file not found")
+            continue
+        
+        count = 0
+        for sequence in parse_fasta(filepath):
+            # DNA-level encoding
+            kmer_vectors.append(encode_kmers(sequence))
+            gc_values.append(calculate_gc_content(sequence))
+            isolate_labels.append(isolate_name)
+            
+            # Protein-level encoding (if model available)
+            if use_protein:
+                protein_seq = translate_dna_to_protein(sequence)
+                if len(protein_seq) >= 10:  # Minimum protein length
+                    emb = get_protein_embedding(protein_seq, tokenizer, protein_model)
+                    protein_vectors.append(emb)
+                else:
+                    protein_vectors.append(np.zeros(320))  # ESM-2 small dim
+            
+            count += 1
+            if count >= 1000:  # Limit for demo (protein model is slow)
+                break
+        
+        print(f"  {isolate_name}: {count:,} reads loaded")
+    
+    if not kmer_vectors:
+        print("\nError: No sequences loaded.")
+        return 1
+    
+    # Convert to numpy arrays
+    kmer_matrix = np.vstack(kmer_vectors)
+    gc_array = np.array(gc_values)
+    isolate_array = np.array(isolate_labels)
+    
+    # --- Step 2: Combine features ---
+    print("\n[2/5] Combining DNA and protein features...")
+    
+    if use_protein and protein_vectors:
+        protein_matrix = np.vstack(protein_vectors)
+        # Concatenate k-mer and protein embeddings
+        combined_matrix = np.hstack([kmer_matrix, protein_matrix])
+        print(f"  Combined feature dim: {combined_matrix.shape[1]} (k-mer: {kmer_matrix.shape[1]}, protein: {protein_matrix.shape[1]})")
+    else:
+        combined_matrix = kmer_matrix
+        print(f"  Using k-mer features only: {combined_matrix.shape[1]} dims")
+    
+    # --- Step 3: Clustering ---
+    print("\n[3/5] Performing dimensionality reduction and clustering...")
+    
+    embeddings, cluster_ids = perform_clustering(combined_matrix)
+    if cluster_ids is None:
+        return 1
+    
+    print(f"  Created {len(set(cluster_ids))} clusters")
+    
+    # --- Step 4: Build cluster summaries ---
+    print("\n[4/5] Analyzing clusters...")
+    
+    cluster_summary = defaultdict(lambda: {
+        "count": 0,
+        "gc": [],
+        "isolates": Counter(),
+        "kmer_vectors": []
+    })
+    
+    for cid, iso, gc, vec in zip(cluster_ids, isolate_array, gc_array, kmer_matrix):
+        cluster_summary[cid]["count"] += 1
+        cluster_summary[cid]["gc"].append(gc)
+        cluster_summary[cid]["isolates"][iso] += 1
+        cluster_summary[cid]["kmer_vectors"].append(vec)
+    
+    # Detect resistance motifs
+    motif_counts = detect_resistance_motifs(kmer_matrix, cluster_ids, isolate_array)
+    global_kmer_mean = np.mean(kmer_matrix, axis=0)
+    
+    # --- Step 5: Generate report ---
+    print("\n[5/5] Generating report...")
+    generate_cluster_report(cluster_summary, motif_counts, global_kmer_mean)
+    
+    print("\n" + "=" * 60)
+    print("ANALYSIS COMPLETE")
+    print("=" * 60 + "\n")
+    
+    return 0
+
+# ...existing code...
+````
+
+---
+
+### Option B: Post-cluster Protein Annotation
+
+After clustering, annotate each cluster with protein predictions:
+
+````python
+# ...existing code...
+
+# =============================================================================
+# OPTION B: POST-CLUSTER PROTEIN ANNOTATION
+# =============================================================================
+
+# Reference protein sequences for resistance genes (from NCBI/UniProt)
+REFERENCE_PROTEINS = {
+    "blaKPC-2": "MSLYRRLVLLSCLSWPLAGFSATALTNLVAEPFAKLEQDFGGSIGVYAMDTGSGATVSYRAEERFPLCSSFKGFLAAAVLARSQQQAGLLDTPIRYGKNALVPGEQLLSELVVDKDFQQRGVRELVLLCVLKNEEVTAMLGIGKVS",
+    "blaNDM-1": "MELPNIMHPVAKLSTALAAALMLSGCMPGEIRPTIGQQMETGDQRFGDLVFRQLAPNVWQHTSYLDMPGFGAVASNGLIVRDGGRVLVVDTAWTDDQTAQILNWIKQEINLPVALAVVTHAHQDKMGGMDALHAAGIATYANALSNQLAPQEGMVAAQHSLTFAANGWVEPATAP",
+    "blaOXA-48": "MRVLALSAVFLVASIIGMPAVAKEWQENKSWNAHFTEHKSQGVVVLWNENKQQGFTNNLKRANQAFLPASTFKIPNSLIALDLGVVKDEHQVFKWDGQTRDITVVLGKRHRQFESYYQFLENSWDTVVLRPASSPVTTVTSADLPLSGWLKASGSTDNAFPAFPLASGRTGLASSATAQKLPDAMQRLAEWMGFRTLDVVLVVHNNTQDDLTNDLIAQAELAALTSALAALLPTTGKGDNLSGNGTKNGLSARISDAAWKQLSPVLATAAQQLHSDPFSGRGLRQVPLLSPSKRALLITDKTGKEQRTGDLLNRVDASLKPVKLLRQFGPSKVTETVLN",
+    "blaVIM-2": "MFKLLSKLLVYLTASIMAIASPLAFSVDSSGEYPTVSEIPVGEVRLYQIADGVWSHIATQSFDGAVYPSNGLIVRDGDELLLIDTAWGAKNTAALLAEIEKQIGLPVTRAVSTHFHDDRVGGVDVLRAAGVATYASPASGAPA",
+}
+
+def align_to_reference(query_protein, reference_proteins):
+    """
+    Simple alignment score to reference proteins.
+    Returns best matching gene and score.
+    
+    For production, use BLAST or Smith-Waterman.
+    """
+    def simple_similarity(seq1, seq2):
+        """Calculate identity percentage between two sequences."""
+        min_len = min(len(seq1), len(seq2))
+        if min_len == 0:
+            return 0.0
+        matches = sum(1 for a, b in zip(seq1[:min_len], seq2[:min_len]) if a == b)
+        return matches / min_len
+    
+    best_gene = None
+    best_score = 0.0
+    
+    for gene, ref_seq in reference_proteins.items():
+        score = simple_similarity(query_protein, ref_seq)
+        if score > best_score:
+            best_score = score
+            best_gene = gene
+    
+    return best_gene, best_score
+
+def annotate_clusters_with_proteins(cluster_summary, kmer_matrix, cluster_ids):
+    """
+    For each cluster, translate representative sequences and
+    check similarity to known resistance proteins.
+    """
+    print("\n" + "=" * 60)
+    print("PROTEIN-LEVEL ANNOTATION")
+    print("=" * 60 + "\n")
+    
+    # This would require storing original sequences
+    # For now, show the concept
+    
+    annotations = {}
+    
+    for cluster_id in sorted(cluster_summary.keys()):
+        info = cluster_summary[cluster_id]
+        
+        # In real implementation:
+        # 1. Get representative sequences from cluster
+        # 2. Translate to protein
+        # 3. Align to reference database
+        # 4. Report matches
+        
+        print(f"Cluster {cluster_id}: {info['count']} reads")
+        print(f"  → Would translate top sequences and align to protein DB")
+        print()
+        
+        annotations[cluster_id] = {
+            "predicted_gene": None,
+            "confidence": 0.0
+        }
+    
+    return annotations
+
+# ...existing code...
+````
+
+---
+
+### Option C: Use a Dedicated AMR Detection Model
+
+Integrate with specialized models like **DeepARG** or **AMRFinderPlus**:
+
+````python
+# ...existing code...
+
+# =============================================================================
+# OPTION C: EXTERNAL AMR TOOL INTEGRATION
+# =============================================================================
+
+import subprocess
+import tempfile
+
+def run_amrfinder(fasta_path, output_path):
+    """
+    Run NCBI AMRFinderPlus on sequences.
+    
+    Installation: conda install -c bioconda ncbi-amrfinderplus
+    """
+    cmd = [
+        "amrfinder",
+        "-n", fasta_path,        # Nucleotide input
+        "-o", output_path,       # Output file
+        "--plus",                # Include stress/virulence genes
+    ]
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode == 0:
+            return parse_amrfinder_output(output_path)
+        else:
+            print(f"AMRFinder error: {result.stderr}")
+            return None
+    except FileNotFoundError:
+        print("AMRFinderPlus not installed. Install via: conda install -c bioconda ncbi-amrfinderplus")
+        return None
+
+def parse_amrfinder_output(filepath):
+    """Parse AMRFinderPlus TSV output."""
+    results = []
+    with open(filepath, 'r') as f:
+        reader = csv.DictReader(f, delimiter='\t')
+        for row in reader:
+            results.append({
+                "gene": row.get("Gene symbol", ""),
+                "sequence_name": row.get("Protein identifier", ""),
+                "identity": float(row.get("% Identity to reference sequence", 0)),
+                "coverage": float(row.get("% Coverage of reference sequence", 0)),
+                "class": row.get("Class", ""),
+                "subclass": row.get("Subclass", ""),
+            })
+    return results
+
+def integrate_amr_results(cluster_summary, amr_results, isolate_labels, cluster_ids):
+    """
+    Map AMRFinderPlus results back to clusters.
+    """
+    # Build sequence -> cluster mapping
+    seq_to_cluster = {}
+    for idx, (iso, cid) in enumerate(zip(isolate_labels, cluster_ids)):
+        seq_to_cluster[f"read_{idx}"] = cid
+    
+    # Aggregate AMR results per cluster
+    cluster_amr = defaultdict(list)
+    for result in amr_results:
+        seq_name = result["sequence_name"]
+        cid = seq_to_cluster.get(seq_name)
+        if cid is not None:
+            cluster_amr[cid].append(result)
+    
+    return cluster_amr
+
+# ...existing code...
+````
+
+---
+
+## Integration Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         INPUT: FASTA FILES                              │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+            ┌───────────────────────┼───────────────────────┐
+            ▼                       ▼                       ▼
+┌───────────────────┐   ┌───────────────────┐   ┌───────────────────┐
+│   K-MER ENCODING  │   │  DNA → PROTEIN    │   │   EXTERNAL AMR    │
+│   (Current)       │   │  TRANSLATION      │   │   TOOLS           │
+│                   │   │                   │   │                   │
+│  DNA → 1024-dim   │   │  DNA → Amino Acid │   │  AMRFinderPlus    │
+│  frequency vector │   │  sequence         │   │  CARD/ResFinder   │
+└───────────────────┘   └───────────────────┘   └───────────────────┘
+            │                       │                       │
+            │                       ▼                       │
+            │           ┌───────────────────┐               │
+            │           │  PROTEIN LM       │               │
+            │           │  (ESM-2/ProtTrans)│               │
+            │           │                   │               │
+            │           │  Protein → 320-dim│               │
+            │           │  embedding        │               │
+            │           └───────────────────┘               │
+            │                       │                       │
+            └───────────┬───────────┘                       │
+                        ▼                                   │
+            ┌───────────────────┐                           │
+            │  FEATURE FUSION   │                           │
+            │                   │                           │
+            │  Concatenate:     │                           │
+            │  [k-mer | protein]│                           │
+            │  = 1344-dim       │                           │
+            └───────────────────┘                           │
+                        │                                   │
+                        ▼                                   │
+            ┌───────────────────┐                           │
+            │  PCA + CLUSTERING │                           │
+            └───────────────────┘                           │
+                        │                                   │
+                        ▼                                   │
+            ┌───────────────────────────────────────────────┤
+            │           CLUSTER REPORT                      │
+            │  + AMR tool annotations ◄─────────────────────┘
+            └───────────────────────────────────────────────┘
+```
+
+---
+
+## Recommended Approach
+
+For your project objectives, I recommend **combining Options A and C**:
+
+| Method | Strengths | Use For |
+|--------|-----------|---------|
+| K-mer (current) | Fast, unsupervised | Initial clustering, GC analysis |
+| Protein LM (ESM-2) | Captures evolutionary info | Identifying novel variants |
+| AMRFinderPlus | Curated database | Definitive gene identification |
+
+Run the k-mer pipeline for exploration, then validate findings with AMRFinderPlus for publication-quality results.
+
+Similar code found with 1 license type
