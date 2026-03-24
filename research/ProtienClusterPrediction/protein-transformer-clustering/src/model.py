@@ -18,7 +18,11 @@ Connections to Other Modules:
 import torch
 import torch.nn as nn
 import math
-from typing import Optional
+import numpy as np
+import matplotlib.pyplot as plt
+from typing import Optional, Union
+from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
 
 # ============================================================
 # SECTION: POSITIONAL ENCODING
@@ -360,3 +364,108 @@ def create_model(config: dict) -> Transformer:
         output_dim=config.get('latent_dim', 64),
         dropout=config.get('dropout_rate', 0.1)
     )
+
+
+# ============================================================
+# SECTION: VISUALIZATION FUNCTIONS
+# Purpose: Plot embeddings from the transformer model
+# ============================================================
+
+def plot_projection(
+    model: Transformer,
+    tokens: torch.Tensor,
+    labels: Optional[Union[torch.Tensor, np.ndarray]] = None,
+    dim: int = 2,
+    save_path: Optional[str] = None
+) -> plt.Figure:
+    """
+    Plot embeddings using direct linear projection to 2D/3D.
+    
+    Args:
+        model: Trained Transformer model
+        tokens: Token IDs (batch_size, seq_len)
+        labels: Optional cluster labels for coloring
+        dim: 2 or 3 for output dimensions
+        save_path: Optional path to save figure
+    """
+    model.eval()
+    with torch.no_grad():
+        embeddings = model.get_sequence_embedding(tokens, pooling='mean')
+        # Linear projection to plotting dimensions
+        proj = nn.Linear(embeddings.shape[-1], dim)
+        coords = proj(embeddings).numpy()
+    
+    if isinstance(labels, torch.Tensor):
+        labels = labels.numpy()
+    
+    fig = plt.figure(figsize=(10, 8))
+    if dim == 2:
+        plt.scatter(coords[:, 0], coords[:, 1], c=labels, cmap='tab10', alpha=0.7)
+        plt.xlabel('Dim 1')
+        plt.ylabel('Dim 2')
+    else:
+        ax = fig.add_subplot(111, projection='3d')
+        ax.scatter(coords[:, 0], coords[:, 1], coords[:, 2], c=labels, cmap='tab10', alpha=0.7)
+        ax.set_xlabel('Dim 1')
+        ax.set_ylabel('Dim 2')
+        ax.set_zlabel('Dim 3')
+    
+    plt.title('Projection Plot')
+    if labels is not None:
+        plt.colorbar(label='Cluster')
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+    return fig
+
+
+def plot_tsne_pca(
+    model: Transformer,
+    tokens: torch.Tensor,
+    labels: Optional[Union[torch.Tensor, np.ndarray]] = None,
+    method: str = 'tsne',
+    dim: int = 2,
+    save_path: Optional[str] = None
+) -> plt.Figure:
+    """
+    Plot embeddings using t-SNE or PCA dimensionality reduction.
+    
+    Args:
+        model: Trained Transformer model
+        tokens: Token IDs (batch_size, seq_len)
+        labels: Optional cluster labels for coloring
+        method: 'tsne' or 'pca'
+        dim: 2 or 3 for output dimensions
+        save_path: Optional path to save figure
+    """
+    model.eval()
+    with torch.no_grad():
+        embeddings = model.get_sequence_embedding(tokens, pooling='mean').numpy()
+    
+    # Dimensionality reduction
+    if method == 'tsne':
+        reducer = TSNE(n_components=dim, random_state=42, perplexity=min(30, len(embeddings)-1))
+    else:
+        reducer = PCA(n_components=dim)
+    coords = reducer.fit_transform(embeddings)
+    
+    if isinstance(labels, torch.Tensor):
+        labels = labels.numpy()
+    
+    fig = plt.figure(figsize=(10, 8))
+    if dim == 2:
+        plt.scatter(coords[:, 0], coords[:, 1], c=labels, cmap='tab10', alpha=0.7)
+        plt.xlabel(f'{method.upper()} 1')
+        plt.ylabel(f'{method.upper()} 2')
+    else:
+        ax = fig.add_subplot(111, projection='3d')
+        ax.scatter(coords[:, 0], coords[:, 1], coords[:, 2], c=labels, cmap='tab10', alpha=0.7)
+        ax.set_xlabel(f'{method.upper()} 1')
+        ax.set_ylabel(f'{method.upper()} 2')
+        ax.set_zlabel(f'{method.upper()} 3')
+    
+    plt.title(f'{method.upper()} Visualization')
+    if labels is not None:
+        plt.colorbar(label='Cluster')
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+    return fig
