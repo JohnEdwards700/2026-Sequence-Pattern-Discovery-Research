@@ -13,6 +13,9 @@ Research Questions:
 Usage:
     python carbapenem_resistance_analysis.py
     python carbapenem_resistance_analysis.py --fastas iso1=path1.fasta iso2=path2.fasta
+
+Steps:
+k-mer encoding -> PCA -> MiniBatchKMeans clustering -> Resistance motif detection -> Report generation
 """
 
 import os
@@ -22,6 +25,7 @@ import argparse
 import itertools
 from collections import defaultdict, Counter
 import numpy as np
+from viz_tsne import plot_tsne
 
 # Optional: sklearn for clustering (fallback to simple methods if unavailable)
 try:
@@ -381,6 +385,9 @@ def run_analysis(fasta_files):
     embeddings, cluster_ids = perform_clustering(kmer_matrix)
     if cluster_ids is None:
         return 1
+    
+    # t-SNE visualization on PCA embeddings
+    plot_tsne(embeddings, isolate_array, title="t-SNE on PCA embeddings")
     
     print(f"  Created {len(set(cluster_ids))} clusters")
     
