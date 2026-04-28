@@ -14,6 +14,7 @@ from torch.utils.data import IterableDataset, DataLoader
 import numpy as np
 from collections import defaultdict, Counter
 from sklearn.cluster import MiniBatchKMeans
+from viz_tsne import plot_tsne
 
 ############################################
 # CONFIGURATION
@@ -180,6 +181,9 @@ print("Embedding and clustering...")
 model.eval()
 with torch.no_grad():
     embeddings = model.encoder(dataset_tensor.to(DEVICE)).cpu().numpy()
+
+# t-SNE visualization on autoencoder embeddings
+plot_tsne(embeddings, isolate_labels, title="t-SNE on Autoencoder embeddings", perplexity=30)
 
 kmeans = MiniBatchKMeans(n_clusters=N_CLUSTERS, random_state=42)
 cluster_ids = kmeans.fit_predict(embeddings)
