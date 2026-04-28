@@ -2,6 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 
+# k-mers(1024D) -> PCA (32D) -> t-SNE(2D) for visualization
+
 def plot_tsne(embeddings, labels, title="t-SNE (2D)", random_state=42, perplexity=30):
     """
     embeddings: (n_samples, n_features) numpy array (use PCA embeddings from testfile.py)
