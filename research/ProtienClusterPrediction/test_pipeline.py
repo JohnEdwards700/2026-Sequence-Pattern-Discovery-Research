@@ -37,15 +37,31 @@ LATENT_DIM = 32
 BATCH_SIZE = 512
 EPOCHS = 5
 N_CLUSTERS = 6
-MAX_READS_PER_ISOLATE = 200,000
+MAX_READS_PER_ISOLATE = 200000
 RANDOM_STATE = 42
 
 # Search these joint PCA/k-means settings and keep the best silhouette score.
 PCA_COMPONENT_OPTIONS = [2, 4, 8, 16, 32, 64, 128]
 KMEANS_CLUSTER_OPTIONS = [2, 3, 4, 5, 6, 8, 10, 12]
-SILHOUETTE_SAMPLE_SIZE = 100,000
+SILHOUETTE_SAMPLE_SIZE = 100000
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+def get_device():
+    """
+    Prefer CUDA when available, otherwise run on CPU.
+    """
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def clear_device_cache(device):
+    """
+    Clear CUDA cache only when the active device is a CUDA device.
+    """
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+
+DEVICE = get_device()
+USE_CUDA = DEVICE.type == "cuda"
 
 ############################################
 # ESM2 Embedding
@@ -88,7 +104,7 @@ def embed_dataset(file_path, embedder, cache_file=None, chunk_size=256):
         del emb
         del mask
         del pooled
-        torch.cuda.empty_cache()
+        clear_device_cache(DEVICE)
 
         print(f"Processed {min(i + chunk_size, len(sequences))}/{len(sequences)}")
 
@@ -253,7 +269,9 @@ def choose_best_pca_kmeans(
     return best_result, results
 
 
-embedder = ESMEmbedder()
+print(f"Using device: {DEVICE}")
+
+embedder = ESMEmbedder(device=DEVICE)
 
 # Embed main dataset with caching
 dataset1_file = ISOLATE_FASTAS["isolate_main"]
@@ -279,7 +297,12 @@ print("Training transformer... 🚀")
 
 seq_data, seq_indices = create_sequences(dataset1_emb)
 
-loader = DataLoader(seq_data, batch_size=32, shuffle=True)
+loader = DataLoader(
+    seq_data,
+    batch_size=32,
+    shuffle=True,
+    pin_memory=USE_CUDA,
+)
 
 transformer = EmbeddingTransformer(
     input_dim=dataset1_emb.shape[1]
@@ -290,7 +313,7 @@ loss_fn = nn.MSELoss()
 
 transformer.train()
 
-for epoch in range(5):
+for epoch in range(EPOCHS):
     total_loss = 0.0
 
     for batch in loader:
