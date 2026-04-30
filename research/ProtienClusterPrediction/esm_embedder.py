@@ -139,9 +139,9 @@ class ESMEmbedder:
             embeddings = embeddings[:, 1:-1, :]
             attention_mask = attention_mask[:, 1:-1]
 
-            # Move to CPU to save GPU memory
-            all_embeddings.append(embeddings.cpu())
-            all_masks.append(attention_mask.cpu())
+            # Keep on GPU for faster processing
+            all_embeddings.append(embeddings)
+            all_masks.append(attention_mask)
 
         # Concatenate all batches
         embeddings_tensor = torch.cat(all_embeddings, dim=0)

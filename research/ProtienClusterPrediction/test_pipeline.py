@@ -36,14 +36,14 @@ ISOLATE_FASTAS = {
 K = 5
 LATENT_DIM = 32
 BATCH_SIZE = 512
-EPOCHS = 5
+EPOCHS = 20
 N_CLUSTERS = 6
 MAX_READS_PER_ISOLATE = 200000
 RANDOM_STATE = 42
 
 # Search these joint PCA/k-means settings and keep the best silhouette score.
-PCA_COMPONENT_OPTIONS = [2, 4, 8, 16, 32, 64, 128]
-KMEANS_CLUSTER_OPTIONS = [2, 3, 4, 5, 6, 8, 10, 12]
+PCA_COMPONENT_OPTIONS = [2, 4, 8, 16, 32, 64, 128, 256]
+KMEANS_CLUSTER_OPTIONS = [2, 3, 4, 5, 6, 8, 10, 12, 16, 20]
 SILHOUETTE_SAMPLE_SIZE = 100000
 
 def get_device():
@@ -63,6 +63,15 @@ def clear_device_cache(device):
 
 DEVICE = get_device()
 USE_CUDA = DEVICE.type == "cuda"
+
+# GPU diagnostics
+print(f"Using device: {DEVICE}")
+print(f"CUDA available: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"Number of GPUs: {torch.cuda.device_count()}")
+    print(f"GPU name: {torch.cuda.get_device_name(0)}")
+    print(f"CUDA version: {torch.version.cuda}")
+    print(f"cuDNN version: {torch.backends.cudnn.version()}")
 
 ############################################
 # ESM2 Embedding
@@ -100,7 +109,7 @@ def embed_dataset(file_path, embedder, cache_file=None, chunk_size=256, max_sequ
         emb, mask = embedder.embed_sequences(chunk)
 
         # pooled shape: (batch, 480)
-        pooled = mean_pool(emb, mask).cpu()
+        pooled = mean_pool(emb, mask)
 
         all_embeddings.append(pooled)
 
@@ -124,7 +133,7 @@ def embed_dataset(file_path, embedder, cache_file=None, chunk_size=256, max_sequ
     return sequences, embeddings
 
 class EmbeddingTransformer(nn.Module):
-    def __init__(self, input_dim=512, model_dim=256, nhead=8, num_layers=4):
+    def __init__(self, input_dim=512, model_dim=512, nhead=16, num_layers=8):
         super().__init__()
 
         self.input_proj = nn.Linear(input_dim, model_dim)
@@ -260,8 +269,6 @@ def choose_best_pca_kmeans_train_val(
     return best_result, results
 
 
-print(f"Using device: {DEVICE}")
-
 embedder = ESMEmbedder(device=DEVICE)
 
 # Embed main dataset with caching
@@ -320,11 +327,14 @@ loader = DataLoader(
     seq_data,
     batch_size=32,
     shuffle=True,
-    pin_memory=USE_CUDA,
+    pin_memory=False,
 )
 
 transformer = EmbeddingTransformer(
-    input_dim=dataset1_emb.shape[1]
+    input_dim=dataset1_emb.shape[1],
+    model_dim=512,        # Increase from 256
+    nhead=16,             # Increase from 8
+    num_layers=8          # Increase from 4
 ).to(DEVICE)
 
 optimizer = torch.optim.Adam(transformer.parameters(), lr=1e-4)
