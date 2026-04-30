@@ -1,4 +1,29 @@
-/comps
-/CRM_Slate_Internship
-/Microsoft VS Code
-/TestFiles
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache/test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editor/project-local settings
+.vscode/
+
+# Cache / generated model outputs
+cache/
+*.pt
+*.pth
+
+# Generated research outputs
+pca_kmeans_*_scores.csv
+
+# Logs
+*.log

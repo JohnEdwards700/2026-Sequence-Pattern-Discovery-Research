@@ -21,6 +21,7 @@ import os
 import csv
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
+from sklearn.model_selection import train_test_split
 
 ############################################
 # CONFIGURATION
@@ -80,8 +81,11 @@ def mean_pool(embeddings, masks):
     # Calculate the mean of embeddings
     mean_embeddings = sum_embeddings / sum_masks
     return mean_embeddings
-def embed_dataset(file_path, embedder, cache_file=None, chunk_size=256):
+
+def embed_dataset(file_path, embedder, cache_file=None, chunk_size=256, max_sequences=None):
     sequences = [str(record.seq) for record in SeqIO.parse(file_path, "fasta")]
+    if max_sequences is not None:
+        sequences = sequences[:max_sequences]
 
     if cache_file and os.path.exists(cache_file):
         print(f"Loading cached embeddings from {cache_file}")
@@ -164,21 +168,18 @@ def create_sequences(embeddings, seq_len=32):
     return torch.stack(chunks), indices
 
 
-def choose_best_pca_kmeans(
-    embeddings,
+def choose_best_pca_kmeans_train_val(
+    X_train,
+    X_val,
     pca_components_options,
     kmeans_cluster_options,
-    silhouette_sample_size=None,
 ):
-    """
-    Jointly tune PCA dimensions and k-means clusters by maximizing silhouette.
-    """
-    n_samples, n_features = embeddings.shape
-    max_components = min(n_samples, n_features)
-    results = []
     best_result = None
+    results = []
 
-    print("\nSelecting PCA dimensions and k by silhouette score...")
+    print("\nSelecting PCA dimensions and k using validation silhouette score...")
+
+    max_components = min(X_train.shape[0], X_train.shape[1])
 
     for n_components in pca_components_options:
         if n_components < 1 or n_components > max_components:
@@ -186,85 +187,75 @@ def choose_best_pca_kmeans(
             continue
 
         pca = PCA(n_components=n_components, random_state=RANDOM_STATE)
-        reduced_embeddings = pca.fit_transform(embeddings)
+        X_train_pca = pca.fit_transform(X_train)
+        X_val_pca = pca.transform(X_val)
+
         explained_variance = float(np.sum(pca.explained_variance_ratio_))
 
         for n_clusters in kmeans_cluster_options:
-            if n_clusters < 2 or n_clusters >= n_samples:
-                print(f"  Skipping PCA={n_components}, k={n_clusters}: silhouette needs 2 <= k < n_samples")
+            if n_clusters < 2 or n_clusters >= len(X_train_pca):
+                print(f"  Skipping PCA={n_components}, k={n_clusters}: need 2 <= k < n_train")
                 continue
 
             kmeans = MiniBatchKMeans(
                 n_clusters=n_clusters,
                 random_state=RANDOM_STATE,
             )
-            labels = kmeans.fit_predict(reduced_embeddings)
 
-            if len(np.unique(labels)) < 2:
-                print(f"  Skipping PCA={n_components}, k={n_clusters}: only one cluster was produced")
+            train_labels = kmeans.fit_predict(X_train_pca)
+            val_labels = kmeans.predict(X_val_pca)
+
+            if len(np.unique(val_labels)) < 2:
+                print(f"  Skipping PCA={n_components}, k={n_clusters}: only one cluster predicted on val")
                 continue
 
-            sample_size = silhouette_sample_size
-            if sample_size is not None:
-                sample_size = min(sample_size, n_samples)
-
-            score = silhouette_score(
-                reduced_embeddings,
-                labels,
-                sample_size=sample_size,
-                random_state=RANDOM_STATE,
-            )
+            val_score = silhouette_score(X_val_pca, val_labels)
 
             result = {
                 "pca_components": n_components,
                 "n_clusters": n_clusters,
-                "silhouette_score": float(score),
+                "val_silhouette": float(val_score),
                 "explained_variance": explained_variance,
-                "labels": labels,
-                "embeddings": reduced_embeddings,
-                "kmeans": kmeans,
                 "pca": pca,
+                "kmeans": kmeans,
+                "train_labels": train_labels,
+                "val_labels": val_labels,
             }
             results.append(result)
 
             print(
                 f"  PCA={n_components:>3}, k={n_clusters:>2}, "
-                f"silhouette={score:.4f}, explained_variance={explained_variance:.2%}"
+                f"val_silhouette={val_score:.4f}, explained_variance={explained_variance:.2%}"
             )
 
-            if best_result is None or score > best_result["silhouette_score"]:
+            if best_result is None or val_score > best_result["val_silhouette"]:
                 best_result = result
 
     if best_result is None:
-        raise ValueError("No valid PCA/k-means setting produced a silhouette score.")
+        raise ValueError("No valid PCA/k-means setting found.")
 
-    with open("pca_kmeans_silhouette_scores.csv", "w", newline="") as f:
+    with open("pca_kmeans_val_scores.csv", "w", newline="") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=[
-                "pca_components",
-                "n_clusters",
-                "silhouette_score",
-                "explained_variance",
-            ],
+            fieldnames=["pca_components", "n_clusters", "val_silhouette", "explained_variance"]
         )
         writer.writeheader()
         for result in results:
             writer.writerow({
                 "pca_components": result["pca_components"],
                 "n_clusters": result["n_clusters"],
-                "silhouette_score": result["silhouette_score"],
+                "val_silhouette": result["val_silhouette"],
                 "explained_variance": result["explained_variance"],
             })
 
     print(
-        "\nBest clustering setting: "
+        "\nBest validation setting: "
         f"PCA={best_result['pca_components']}, "
         f"k={best_result['n_clusters']}, "
-        f"silhouette={best_result['silhouette_score']:.4f}, "
+        f"val_silhouette={best_result['val_silhouette']:.4f}, "
         f"explained_variance={best_result['explained_variance']:.2%}"
     )
-    print("Saved silhouette search results to pca_kmeans_silhouette_scores.csv")
+    print("Saved validation search results to pca_kmeans_val_scores.csv")
 
     return best_result, results
 
@@ -276,7 +267,12 @@ embedder = ESMEmbedder(device=DEVICE)
 # Embed main dataset with caching
 dataset1_file = ISOLATE_FASTAS["isolate_main"]
 dataset1_cache = "cache/output_embeddings.pt"
-dataset1_seqs, dataset1_emb = embed_dataset(dataset1_file, embedder, cache_file=dataset1_cache)
+dataset1_seqs, dataset1_emb = embed_dataset(
+    dataset1_file,
+    embedder,
+    cache_file=dataset1_cache,
+    max_sequences=MAX_READS_PER_ISOLATE
+)
 
 # Embed background datasets with caching
 background_files = {
@@ -288,14 +284,37 @@ background_seqs = {}
 
 for name, path in background_files.items():
     cache_file = f"cache/{name}_embeddings.pt"
-    seqs, emb = embed_dataset(path, embedder, cache_file=cache_file)
+    seqs, emb = embed_dataset(
+        path,
+        embedder,
+        cache_file=cache_file,
+        max_sequences=MAX_READS_PER_ISOLATE
+    )
     background_seqs[name] = seqs
     background_embs[name] = emb
+
+# Combine all isolates into one shared embedding space
+all_embeddings = torch.cat(
+    [dataset1_emb, background_embs["K22"], background_embs["K31"]],
+    dim=0
+)
+
+all_seqs = (
+    dataset1_seqs
+    + background_seqs["K22"]
+    + background_seqs["K31"]
+)
+
+all_isolate_labels = (
+    ["isolate_main"] * len(dataset1_seqs)
+    + ["background_1"] * len(background_seqs["K22"])
+    + ["background_2"] * len(background_seqs["K31"])
+)
 
 # Pretrain the transformer model
 print("Training transformer... 🚀")
 
-seq_data, seq_indices = create_sequences(dataset1_emb)
+seq_data, seq_indices = create_sequences(all_embeddings)
 
 loader = DataLoader(
     seq_data,
@@ -338,7 +357,7 @@ print("Encoding embeddings with transformer... 🧠")
 transformer.eval()
 
 with torch.no_grad():
-    seq_data, seq_indices = create_sequences(dataset1_emb)
+    seq_data, seq_indices = create_sequences(all_embeddings)
 
     seq_data = seq_data.to(DEVICE)
 
@@ -357,24 +376,65 @@ for chunk in encoded:
 
 encoded_emb = np.array(encoded_reads)
 
-# Make sure we only keep as many reads as we originally had
-encoded_emb = encoded_emb[:len(dataset1_seqs)]
+# Keep labels/sequences aligned with encoded embeddings
+valid_n = len(encoded_emb)
+encoded_emb = encoded_emb[:valid_n]
+all_seqs = all_seqs[:valid_n]
+all_isolate_labels = all_isolate_labels[:valid_n]
 
 print("Encoded embedding shape:", encoded_emb.shape)
+print("Number of labels:", len(all_isolate_labels))
 
-# Perform PCA + clustering on the encoded embeddings, choosing the joint setting
-# with the highest silhouette score.
-best_clustering, clustering_search_results = choose_best_pca_kmeans(
-    encoded_emb,
-    PCA_COMPONENT_OPTIONS,
-    KMEANS_CLUSTER_OPTIONS,
-    silhouette_sample_size=SILHOUETTE_SAMPLE_SIZE,
+X = encoded_emb
+y_iso = np.array(all_isolate_labels)
+
+X_train, X_temp, y_train_iso, y_temp_iso = train_test_split(
+    X,
+    y_iso,
+    test_size=0.30,
+    random_state=RANDOM_STATE,
+    stratify=y_iso
 )
 
-pca = best_clustering["pca"]
-kmeans = best_clustering["kmeans"]
-cluster_ids = best_clustering["labels"]
-cluster_embeddings = best_clustering["embeddings"]
+X_val, X_test, y_val_iso, y_test_iso = train_test_split(
+    X_temp,
+    y_temp_iso,
+    test_size=0.50,
+    random_state=RANDOM_STATE,
+    stratify=y_temp_iso
+)
+
+print("Train shape:", X_train.shape)
+print("Val shape:", X_val.shape)
+print("Test shape:", X_test.shape)
+
+# Select PCA dimension and k using validation silhouette score
+best_clustering, clustering_search_results = choose_best_pca_kmeans_train_val(
+    X_train,
+    X_val,
+    PCA_COMPONENT_OPTIONS,
+    KMEANS_CLUSTER_OPTIONS,
+)
+
+best_pca = best_clustering["pca"]
+best_kmeans = best_clustering["kmeans"]
+
+# Final test performance
+X_test_pca = best_pca.transform(X_test)
+test_cluster_ids = best_kmeans.predict(X_test_pca)
+
+if len(np.unique(test_cluster_ids)) < 2:
+    print("Test set produced only one cluster; silhouette score is undefined.")
+    test_silhouette = float("nan")
+else:
+    test_silhouette = silhouette_score(X_test_pca, test_cluster_ids)
+
+print("\nFinal test performance:")
+print(f"  Test silhouette score: {test_silhouette:.4f}")
+
+# Also predict clusters for the full dataset for summaries / plotting
+X_all_pca = best_pca.transform(encoded_emb)
+cluster_ids = best_kmeans.predict(X_all_pca)
 N_CLUSTERS = best_clustering["n_clusters"]
 
 ############################################
@@ -386,10 +446,13 @@ cluster_summaries = defaultdict(lambda: {"sequences": [], "isolate_counts": Coun
 def gc_content(seq):
     return (seq.count("G") + seq.count("C")) / len(seq)
 
-for i, seq in enumerate(dataset1_seqs[:len(cluster_ids)]):
+for i, (seq, iso_label) in enumerate(zip(all_seqs, all_isolate_labels)):
+    if i >= len(cluster_ids):
+        break
+
     cluster = cluster_ids[i]
     cluster_summaries[cluster]["sequences"].append(seq)
-    cluster_summaries[cluster]["isolate_counts"]["main"] += 1
+    cluster_summaries[cluster]["isolate_counts"][iso_label] += 1
     cluster_summaries[cluster]["gc_content"].append(gc_content(seq))
 
 for cluster, summary in cluster_summaries.items():
@@ -403,22 +466,24 @@ for cluster, summary in cluster_summaries.items():
 # PCA VISUALIZATION
 ############################################
 
-# Reduce dimensionality with PCA
-pca = PCA(n_components=2)
-reduced_emb = pca.fit_transform(encoded_emb)
+# 2D PCA visualization for the full dataset
+plot_pca = PCA(n_components=2, random_state=RANDOM_STATE)
+reduced_emb = plot_pca.fit_transform(encoded_emb)
 
-# Plot the clusters
 plt.figure(figsize=(8, 6))
 plt.scatter(
     reduced_emb[:, 0],
     reduced_emb[:, 1],
     c=cluster_ids,
     cmap="rainbow",
-    alpha=0.5,
-    label="Clusters"
+    alpha=0.5
 )
 plt.xlabel("PC1")
 plt.ylabel("PC2")
-plt.title("Clusters in Embedding Space")
-plt.colorbar()
+plt.title(
+    f"2D PCA visualization | best val PCA={best_clustering['pca_components']}, "
+    f"k={best_clustering['n_clusters']}, "
+    f"test silhouette={test_silhouette:.4f}"
+)
+plt.colorbar(label="Cluster ID")
 plt.show()
