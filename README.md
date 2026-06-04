@@ -1,6 +1,9 @@
 ## Overview
 This project analyzes Whole Genome Sequencing (WGS) data from bacterial isolates to explore genetic patterns associated with **carbapenem resistance** (last-resort antibiotics). We compare resistant isolates against background genomes to identify shared vs. unique signals and generate hypotheses about resistance mechanisms.
 
+## Findings
+[Sequence_Research_2026.pdf](https://github.com/user-attachments/files/28583155/Sequence_Research_2026.pdf)
+
 ## Research Questions 
 - Which known carbapenem resistance genes (e.g., **blaKPC, blaNDM, blaVIM, blaOXA**) appear in each isolate?
 - Are resistance genes likely **chromosomal** or **plasmid-borne**?
