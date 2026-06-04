@@ -14,7 +14,7 @@ from torch.utils.data import IterableDataset, DataLoader
 import numpy as np
 from collections import defaultdict, Counter
 from sklearn.cluster import MiniBatchKMeans
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
 from esm_embedder import ESMEmbedder
 from Bio import SeqIO
 import os
@@ -40,6 +40,10 @@ EPOCHS = 1 # 5
 N_CLUSTERS = 6
 MAX_READS_PER_ISOLATE = 200 # 200000
 RANDOM_STATE = 42
+SEQ_LEN = 32
+TRANSFORMER_MODEL_DIM = 256
+TRANSFORMER_NHEAD = 8
+TRANSFORMER_NUM_LAYERS = 4
 
 # Search these joint PCA/k-means settings and keep the best silhouette score.
 PCA_COMPONENT_OPTIONS = [2, 8, 16] # 2, 4, 8, 16, 32, 64, 128
@@ -141,6 +145,7 @@ def create_sequences(embeddings, seq_len=32):
     indices = []
 
     n_chunks = len(embeddings) // seq_len
+    dropped_reads = len(embeddings) - (n_chunks * seq_len)
 
     for i in range(n_chunks):
         start = i * seq_len
@@ -149,7 +154,79 @@ def create_sequences(embeddings, seq_len=32):
         chunks.append(embeddings[start:end])
         indices.append((start, end))
 
-    return torch.stack(chunks), indices
+    return torch.stack(chunks), indices, dropped_reads
+
+
+def summarize_representation(name, X):
+    dim_var = np.var(X, axis=0)
+    norms = np.linalg.norm(X, axis=1)
+    print(f"\n{name} diagnostics:")
+    print(
+        f"  Per-dimension variance - mean: {dim_var.mean():.8f}, "
+        f"min: {dim_var.min():.8f}, max: {dim_var.max():.8f}"
+    )
+    print(
+        f"  Vector L2 norms - mean: {norms.mean():.8f}, "
+        f"std: {norms.std():.8f}, min: {norms.min():.8f}, max: {norms.max():.8f}"
+    )
+
+
+def evaluate_representation(name, X, y_iso, pca_components_options, kmeans_cluster_options):
+    X_train, X_temp, y_train_iso, y_temp_iso = train_test_split(
+        X,
+        y_iso,
+        test_size=0.30,
+        random_state=RANDOM_STATE,
+        stratify=y_iso
+    )
+
+    X_val, X_test, y_val_iso, y_test_iso = train_test_split(
+        X_temp,
+        y_temp_iso,
+        test_size=0.50,
+        random_state=RANDOM_STATE,
+        stratify=y_temp_iso
+    )
+
+    print(f"\nEvaluating representation: {name}")
+    print("Train shape:", X_train.shape)
+    print("Val shape:", X_val.shape)
+    print("Test shape:", X_test.shape)
+
+    best_clustering, clustering_search_results = choose_best_pca_kmeans_train_val(
+        X_train,
+        X_val,
+        pca_components_options,
+        kmeans_cluster_options,
+    )
+
+    best_pca = best_clustering["pca"]
+    best_kmeans = best_clustering["kmeans"]
+
+    X_test_pca = best_pca.transform(X_test)
+    test_cluster_ids = best_kmeans.predict(X_test_pca)
+
+    if len(np.unique(test_cluster_ids)) < 2:
+        test_silhouette = float("nan")
+        test_davies_bouldin = float("nan")
+        test_calinski_harabasz = float("nan")
+        print("Test set produced only one cluster; clustering diagnostics are undefined.")
+    else:
+        test_silhouette = silhouette_score(X_test_pca, test_cluster_ids)
+        test_davies_bouldin = davies_bouldin_score(X_test_pca, test_cluster_ids)
+        test_calinski_harabasz = calinski_harabasz_score(X_test_pca, test_cluster_ids)
+
+    print(f"Test silhouette score: {test_silhouette:.4f}")
+    print(f"Test Davies-Bouldin score: {test_davies_bouldin:.4f}")
+    print(f"Test Calinski-Harabasz score: {test_calinski_harabasz:.4f}")
+
+    return {
+        "name": name,
+        "X": X,
+        "best_clustering": best_clustering,
+        "search_results": clustering_search_results,
+        "test_silhouette": test_silhouette,
+    }
 
 
 def choose_best_pca_kmeans_train_val(
@@ -296,12 +373,16 @@ all_isolate_labels = (
 # Pretrain the transformer model
 print("Training transformer... 🚀")
 
-seq_data, seq_indices = create_sequences(all_embeddings)
+seq_data, seq_indices, dropped_reads = create_sequences(all_embeddings, seq_len=SEQ_LEN)
+print(f"Chunked embeddings into {len(seq_indices)} sequences of length {SEQ_LEN}; dropped reads: {dropped_reads}")
 
 loader = DataLoader(seq_data, batch_size=32, shuffle=True)
 
 transformer = EmbeddingTransformer(
-    input_dim=dataset1_emb.shape[1]
+    input_dim=dataset1_emb.shape[1],
+    model_dim=TRANSFORMER_MODEL_DIM,
+    nhead=TRANSFORMER_NHEAD,
+    num_layers=TRANSFORMER_NUM_LAYERS,
 ).to(DEVICE)
 
 optimizer = torch.optim.Adam(transformer.parameters(), lr=1e-4)
@@ -334,7 +415,7 @@ print("Encoding embeddings with transformer... 🧠")
 transformer.eval()
 
 with torch.no_grad():
-    seq_data, seq_indices = create_sequences(all_embeddings)
+    seq_data, seq_indices, dropped_reads = create_sequences(all_embeddings, seq_len=SEQ_LEN)
 
     seq_data = seq_data.to(DEVICE)
 
@@ -355,6 +436,7 @@ encoded_emb = np.array(encoded_reads)
 
 # Keep labels/sequences aligned with encoded embeddings
 valid_n = len(encoded_emb)
+raw_emb = all_embeddings.cpu().numpy()[:valid_n]
 encoded_emb = encoded_emb[:valid_n]
 all_seqs = all_seqs[:valid_n]
 all_isolate_labels = all_isolate_labels[:valid_n]
@@ -362,55 +444,37 @@ all_isolate_labels = all_isolate_labels[:valid_n]
 print("Encoded embedding shape:", encoded_emb.shape)
 print("Number of labels:", len(all_isolate_labels))
 
-X = encoded_emb
 y_iso = np.array(all_isolate_labels)
+summarize_representation("Raw pooled ESM embeddings", raw_emb)
+summarize_representation("Transformer hidden embeddings", encoded_emb)
 
-X_train, X_temp, y_train_iso, y_temp_iso = train_test_split(
-    X,
+raw_result = evaluate_representation(
+    "Raw pooled ESM embeddings",
+    raw_emb,
     y_iso,
-    test_size=0.30,
-    random_state=RANDOM_STATE,
-    stratify=y_iso
+    PCA_COMPONENT_OPTIONS,
+    KMEANS_CLUSTER_OPTIONS,
 )
-
-X_val, X_test, y_val_iso, y_test_iso = train_test_split(
-    X_temp,
-    y_temp_iso,
-    test_size=0.50,
-    random_state=RANDOM_STATE,
-    stratify=y_temp_iso
-)
-
-print("Train shape:", X_train.shape)
-print("Val shape:", X_val.shape)
-print("Test shape:", X_test.shape)
-
-# Select PCA dimension and k using validation silhouette score
-best_clustering, clustering_search_results = choose_best_pca_kmeans_train_val(
-    X_train,
-    X_val,
+transformer_result = evaluate_representation(
+    "Transformer hidden embeddings",
+    encoded_emb,
+    y_iso,
     PCA_COMPONENT_OPTIONS,
     KMEANS_CLUSTER_OPTIONS,
 )
 
+selected_result = transformer_result if transformer_result["test_silhouette"] > raw_result["test_silhouette"] else raw_result
+
+print(f"\nSelected representation: {selected_result['name']}")
+
+best_clustering = selected_result["best_clustering"]
+clustering_search_results = selected_result["search_results"]
+test_silhouette = selected_result["test_silhouette"]
 best_pca = best_clustering["pca"]
 best_kmeans = best_clustering["kmeans"]
 
-# Final test performance
-X_test_pca = best_pca.transform(X_test)
-test_cluster_ids = best_kmeans.predict(X_test_pca)
-
-if len(np.unique(test_cluster_ids)) < 2:
-    print("Test set produced only one cluster; silhouette score is undefined.")
-    test_silhouette = float("nan")
-else:
-    test_silhouette = silhouette_score(X_test_pca, test_cluster_ids)
-
-print("\nFinal test performance:")
-print(f"  Test silhouette score: {test_silhouette:.4f}")
-
 # Also predict clusters for the full dataset for summaries / plotting
-X_all_pca = best_pca.transform(encoded_emb)
+X_all_pca = best_pca.transform(selected_result["X"])
 cluster_ids = best_kmeans.predict(X_all_pca)
 N_CLUSTERS = best_clustering["n_clusters"]
 
@@ -443,9 +507,9 @@ for cluster, summary in cluster_summaries.items():
 # PCA VISUALIZATION
 ############################################
 
-# 2D PCA visualization for the full dataset
+# 2D PCA visualization for the selected representation
 plot_pca = PCA(n_components=2, random_state=RANDOM_STATE)
-reduced_emb = plot_pca.fit_transform(encoded_emb)
+reduced_emb = plot_pca.fit_transform(selected_result["X"])
 
 plt.figure(figsize=(8, 6))
 plt.scatter(
@@ -458,7 +522,7 @@ plt.scatter(
 plt.xlabel("PC1")
 plt.ylabel("PC2")
 plt.title(
-    f"2D PCA visualization | best val PCA={best_clustering['pca_components']}, "
+    f"2D PCA visualization ({selected_result['name']}) | best val PCA={best_clustering['pca_components']}, "
     f"k={best_clustering['n_clusters']}, "
     f"test silhouette={test_silhouette:.4f}"
 )

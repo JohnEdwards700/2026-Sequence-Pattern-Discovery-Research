@@ -14,6 +14,9 @@ from torch.utils.data import IterableDataset, DataLoader
 import numpy as np
 from collections import defaultdict, Counter
 from sklearn.cluster import MiniBatchKMeans
+from sklearn.decomposition import PCA
+from sklearn.metrics import silhouette_score
+from sklearn.model_selection import train_test_split
 from viz_tsne import plot_tsne
 
 ############################################
@@ -26,12 +29,17 @@ ISOLATE_FASTAS = {
     "background_2": "data/K31_sequence.fasta",
 }
 
-K = 5
-LATENT_DIM = 32
-BATCH_SIZE = 512
-EPOCHS = 5
+K = 5  # k-mer size
+LATENT_DIM = 16 # Dimension of autoencoder latent space
+BATCH_SIZE = 512 # Adjust based on memory constraints
+EPOCHS = 5 
 N_CLUSTERS = 6
+CLUSTER_OPTIONS = range(2, 13)
+REPRESENTATION = "autoencoder"  # "autoencoder" or "pca" are the options for clustering features
+PCA_COMPONENTS = 16
 MAX_READS_PER_ISOLATE = 200_000
+RANDOM_STATE = 42
+VAL_SIZE = 0.2
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -161,7 +169,7 @@ loader = DataLoader(dataset_tensor, batch_size=BATCH_SIZE, shuffle=True)
 
 model.train()
 for epoch in range(EPOCHS):
-    epoch_loss = 0.0
+    batch_losses = []
     for batch in loader:
         batch = batch.to(DEVICE)
         recon, _ = model(batch)
@@ -169,8 +177,17 @@ for epoch in range(EPOCHS):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        epoch_loss += loss.item()
-    print(f"Epoch {epoch+1}/{EPOCHS} - loss: {epoch_loss:.4f}")
+        batch_losses.append(loss.item())
+
+    epoch_mean_loss = float(np.mean(batch_losses))
+    epoch_min_loss = float(np.min(batch_losses))
+    epoch_max_loss = float(np.max(batch_losses))
+    print(
+        f"Epoch {epoch+1}/{EPOCHS} - "
+        f"mean loss: {epoch_mean_loss:.8f} | "
+        f"min batch loss: {epoch_min_loss:.8f} | "
+        f"max batch loss: {epoch_max_loss:.8f}"
+    )
 
 ############################################
 # EMBEDDING + CLUSTERING
@@ -180,13 +197,98 @@ print("Embedding and clustering...")
 
 model.eval()
 with torch.no_grad():
-    embeddings = model.encoder(dataset_tensor.to(DEVICE)).cpu().numpy()
+    dataset_on_device = dataset_tensor.to(DEVICE)
+    reconstructions, latent_tensor = model(dataset_on_device)
+    embeddings = latent_tensor.cpu().numpy()
 
-# t-SNE visualization on autoencoder embeddings
-plot_tsne(embeddings, isolate_labels, title="t-SNE on Autoencoder embeddings", perplexity=30)
+recon_np = reconstructions.cpu().numpy()
+sample_mse = np.mean((recon_np - kmer_matrix) ** 2, axis=1)
+latent_var = np.var(embeddings, axis=0)
+latent_norms = np.linalg.norm(embeddings, axis=1)
+collapsed_dims = int(np.sum(latent_var < 1e-8))
 
-kmeans = MiniBatchKMeans(n_clusters=N_CLUSTERS, random_state=42)
-cluster_ids = kmeans.fit_predict(embeddings)
+print("Autoencoder diagnostics:")
+print(
+    f"  Reconstruction MSE per read - mean: {sample_mse.mean():.8f}, "
+    f"median: {np.median(sample_mse):.8f}, std: {sample_mse.std():.8f}, "
+    f"min: {sample_mse.min():.8f}, max: {sample_mse.max():.8f}"
+)
+print(
+    f"  Latent variance per dimension - mean: {latent_var.mean():.8f}, "
+    f"min: {latent_var.min():.8f}, max: {latent_var.max():.8f}, "
+    f"near-zero dims (<1e-8): {collapsed_dims}/{LATENT_DIM}"
+)
+print(
+    f"  Latent vector L2 norms - mean: {latent_norms.mean():.8f}, "
+    f"std: {latent_norms.std():.8f}, min: {latent_norms.min():.8f}, "
+    f"max: {latent_norms.max():.8f}"
+)
+
+if REPRESENTATION == "autoencoder":
+    clustering_features = embeddings
+    representation_name = "Autoencoder"
+elif REPRESENTATION == "pca":
+    n_components = min(PCA_COMPONENTS, kmer_matrix.shape[0], kmer_matrix.shape[1])
+    pca_model = PCA(n_components=n_components, random_state=RANDOM_STATE)
+    clustering_features = pca_model.fit_transform(kmer_matrix)
+    representation_name = f"PCA ({n_components} components)"
+    explained_variance = float(np.sum(pca_model.explained_variance_ratio_))
+    print("PCA diagnostics:")
+    print(f"  Components used: {n_components}")
+    print(f"  Total explained variance: {explained_variance:.4f}")
+else:
+    raise ValueError(f"Unknown REPRESENTATION: {REPRESENTATION}")
+
+print(f"Using representation for clustering: {representation_name}")
+
+# t-SNE visualization on the selected representation
+plot_tsne(
+    clustering_features,
+    isolate_labels,
+    title=f"t-SNE on {representation_name} features",
+    perplexity=30,
+)
+
+X_train, X_val, y_train, y_val = train_test_split(
+    clustering_features,
+    isolate_labels,
+    test_size=VAL_SIZE,
+    random_state=RANDOM_STATE,
+    stratify=isolate_labels,
+)
+
+best_kmeans = None
+best_val_silhouette = float("-inf")
+best_n_clusters = None
+
+print("Searching cluster counts on validation split...")
+
+for n_clusters in CLUSTER_OPTIONS:
+    kmeans = MiniBatchKMeans(n_clusters=n_clusters, random_state=RANDOM_STATE)
+    kmeans.fit(X_train)
+
+    val_cluster_ids = kmeans.predict(X_val)
+    if len(np.unique(val_cluster_ids)) < 2:
+        print(f"  k={n_clusters}: skipped (only one cluster predicted on validation set)")
+        continue
+
+    val_silhouette = silhouette_score(X_val, val_cluster_ids)
+    print(f"  k={n_clusters}: validation silhouette score = {val_silhouette:.4f}")
+
+    if val_silhouette > best_val_silhouette:
+        best_val_silhouette = val_silhouette
+        best_n_clusters = n_clusters
+        best_kmeans = kmeans
+
+if best_kmeans is None:
+    raise ValueError("No valid cluster count produced at least two validation clusters.")
+
+N_CLUSTERS = best_n_clusters
+print(f"Best validation silhouette score: {best_val_silhouette:.4f} at k={N_CLUSTERS}")
+
+# Refit on the full embedding set for final cluster summaries.
+kmeans = MiniBatchKMeans(n_clusters=N_CLUSTERS, random_state=RANDOM_STATE)
+cluster_ids = kmeans.fit_predict(clustering_features)
 
 ############################################
 # CLUSTER SUMMARIES

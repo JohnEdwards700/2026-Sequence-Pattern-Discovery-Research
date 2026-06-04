@@ -21,7 +21,7 @@ ESM_MODEL_OPTIONS = {
 }
 
 # Select which model to use
-ESM_MODEL_NAME = ESM_MODEL_OPTIONS["35M"]  # Change to "150M" or "650M" for better quality
+ESM_MODEL_NAME = ESM_MODEL_OPTIONS["650M"]  # Change to "150M" or "650M" for better quality
 
 # Embedding dimensions for each model (auto-detected, but listed here for reference)
 ESM_EMBEDDING_DIMS = {
@@ -56,7 +56,7 @@ DEVICE = get_device()
 def get_embedding_dim(model_name=None):
     """Get the embedding dimension for a specific ESM2 model."""
     model_name = model_name or ESM_MODEL_NAME
-    return ESM_EMBEDDING_DIMS.get(model_name, 480)
+    return ESM_EMBEDDING_DIMS.get(model_name, 640)
 
 # Print configuration on import
 if __name__ == "__main__":
